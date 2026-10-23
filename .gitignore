@@ -1,0 +1,7 @@
+# Build artifacts temporários do Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.pdb

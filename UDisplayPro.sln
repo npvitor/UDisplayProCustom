@@ -1,0 +1,18 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UDisplayPro", "UDisplayPro.csproj", "{8A4F1E52-3C9B-4D7E-A123-9876543210AB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|AnyCPU = Debug|AnyCPU
+		Release|AnyCPU = Release|AnyCPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8A4F1E52-3C9B-4D7E-A123-9876543210AB}.Debug|AnyCPU.ActiveCfg = Debug|AnyCPU
+		{8A4F1E52-3C9B-4D7E-A123-9876543210AB}.Debug|AnyCPU.Build.0 = Debug|AnyCPU
+		{8A4F1E52-3C9B-4D7E-A123-9876543210AB}.Release|AnyCPU.ActiveCfg = Release|AnyCPU
+		{8A4F1E52-3C9B-4D7E-A123-9876543210AB}.Release|AnyCPU.Build.0 = Release|AnyCPU
+	EndGlobalSection
+EndGlobal
