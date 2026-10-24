@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -47,38 +48,39 @@ namespace UDisplayPro
 
         public static byte[] CompilePS(string hlsl)
         {
-            ID3DBlob code, err;
-            int hr = D3DCompile(hlsl, (IntPtr)hlsl.Length, null, IntPtr.Zero, IntPtr.Zero, "main", "ps_5_0", (1u << 15), 0, out code, out err);
-            if (hr < 0 || code == null)
+            ID3DBlob code = null, err = null, stripped = null;
+            try
             {
-                string msg = err != null ? Marshal.PtrToStringAnsi(err.GetBufferPointer(), (int)err.GetBufferSize()) : ("HRESULT 0x" + hr.ToString("X8"));
-                throw new Exception("Erro ao compilar Pixel Shader D3D11: " + msg);
+                int hr = D3DCompile(hlsl, (IntPtr)Encoding.ASCII.GetByteCount(hlsl), null, IntPtr.Zero, IntPtr.Zero, "main", "ps_5_0", (1u << 15), 0, out code, out err);
+                if (hr < 0 || code == null)
+                    throw new Exception("Erro ao compilar shader: " + (err == null ? hr.ToString("X8") : Marshal.PtrToStringAnsi(err.GetBufferPointer(), (int)err.GetBufferSize())));
+                int hr2 = D3DStripShader(code.GetBufferPointer(), code.GetBufferSize(), 0x1Fu, out stripped);
+                ID3DBlob finalBlob = (hr2 >= 0 && stripped != null) ? stripped : code;
+                byte[] res = new byte[(int)finalBlob.GetBufferSize()];
+                Marshal.Copy(finalBlob.GetBufferPointer(), res, 0, res.Length);
+                return res;
             }
-            ID3DBlob stripped;
-            int hr2 = D3DStripShader(code.GetBufferPointer(), code.GetBufferSize(), 0x1Fu, out stripped);
-            ID3DBlob finalBlob = (hr2 >= 0 && stripped != null) ? stripped : code;
-            int sz = (int)finalBlob.GetBufferSize();
-            byte[] res = new byte[sz];
-            Marshal.Copy(finalBlob.GetBufferPointer(), res, 0, sz);
-            return res;
+            finally
+            {
+                if (stripped != null) Marshal.ReleaseComObject(stripped);
+                if (err != null) Marshal.ReleaseComObject(err);
+                if (code != null) Marshal.ReleaseComObject(code);
+            }
         }
     }
 
     public class ProConfig
     {
-        public int ColorMode = 0;        // 0 = BT.709 Limited (16-235), 1 = BT.709 Full (0-255), 2 = BT.601 Limited
+        public int ColorMode = 2;        // 0 = BT.709 Limited (16-235), 1 = BT.709 Full (0-255), 2 = BT.601 Limited
         public int Brightness = 0;       // -30 .. +30 (%)
         public int Contrast = 100;       // 60 .. 140 (%)
         public int Saturation = 100;     // 0 .. 160 (%)
         public int GammaX100 = 100;      // 75 .. 140 (1.00 = 100)
         public int ColorTemp = 0;        // 0 = 6500K, 1 = 5500K, 2 = 4500K, 3 = 7500K
-        public int TargetFps = 60;       // 30, 45, 60, 75, 90
-        public int EncoderMode = 0;      // 0 = CPU x264 Zero-Latency, 1 = GPU Hardware
-        public int BitrateMbps = 24;     // 8, 16, 24, 32
-        public int CpuThreads = 4;       // 2, 4, 6, 8
-        public int StaticRefreshMs = 80; // 50, 80, 200, 500
-        public bool CompatGdiMode = false;
-
+        public int Vibrance = 0;         // 0..40, selective saturation with gamut protection
+        public int Sharpness = 0;        // 0..50, bounded luma sharpening; 0 compiles out
+        public int EdgeSmoothing = 0;    // 0..50, selective diagonal-edge smoothing
+        public int CaptureFps = 30;      // Requested capture rate, not measured output FPS
         public void Load(string path)
         {
             if (!File.Exists(path)) return;
@@ -100,16 +102,15 @@ namespace UDisplayPro
                         else if (k == "Saturation") Saturation = Math.Max(0, Math.Min(160, iv));
                         else if (k == "GammaX100") GammaX100 = Math.Max(75, Math.Min(140, iv));
                         else if (k == "ColorTemp") ColorTemp = Math.Max(0, Math.Min(3, iv));
-                        else if (k == "TargetFps") TargetFps = Math.Max(20, Math.Min(120, iv));
-                        else if (k == "EncoderMode") EncoderMode = Math.Max(0, Math.Min(1, iv));
-                        else if (k == "BitrateMbps") BitrateMbps = Math.Max(4, Math.Min(40, iv));
-                        else if (k == "CpuThreads") CpuThreads = Math.Max(1, Math.Min(16, iv));
-                        else if (k == "StaticRefreshMs") StaticRefreshMs = Math.Max(30, Math.Min(2000, iv));
+                        else if (k == "Vibrance") Vibrance = Math.Max(0, Math.Min(40, iv));
+                        else if (k == "Sharpness") Sharpness = Math.Max(0, Math.Min(50, iv));
+                        else if (k == "EdgeSmoothing") EdgeSmoothing = Math.Max(0, Math.Min(50, iv));
+                        else if (k == "CaptureFps") CaptureFps = (iv == 45 || iv == 60) ? iv : 30;
+
                     }
-                    if (k == "CompatGdiMode") CompatGdiMode = (v.ToLowerInvariant() == "true" || v == "1");
                 }
             }
-            catch { }
+            catch (Exception ex) { throw new IOException("Falha ao ler/gravar configurações: " + path, ex); }
         }
 
         public void Save(string path)
@@ -119,21 +120,20 @@ namespace UDisplayPro
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("[UDisplayPro]");
+                sb.AppendLine("FormatVersion=2");
                 sb.AppendLine("ColorMode=" + ColorMode);
                 sb.AppendLine("Brightness=" + Brightness);
                 sb.AppendLine("Contrast=" + Contrast);
                 sb.AppendLine("Saturation=" + Saturation);
                 sb.AppendLine("GammaX100=" + GammaX100);
                 sb.AppendLine("ColorTemp=" + ColorTemp);
-                sb.AppendLine("TargetFps=" + TargetFps);
-                sb.AppendLine("EncoderMode=" + EncoderMode);
-                sb.AppendLine("BitrateMbps=" + BitrateMbps);
-                sb.AppendLine("CpuThreads=" + CpuThreads);
-                sb.AppendLine("StaticRefreshMs=" + StaticRefreshMs);
-                sb.AppendLine("CompatGdiMode=" + (CompatGdiMode ? "true" : "false"));
+                sb.AppendLine("Vibrance=" + Vibrance);
+                sb.AppendLine("Sharpness=" + Sharpness);
+                sb.AppendLine("EdgeSmoothing=" + EdgeSmoothing);
+                sb.AppendLine("CaptureFps=" + CaptureFps);
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
             }
-            catch { }
+            catch (Exception ex) { throw new IOException("Falha ao ler/gravar configurações: " + path, ex); }
         }
     }
 
@@ -318,7 +318,8 @@ namespace UDisplayPro
     public class MainWindow : Window
     {
         private ProConfig cfg = new ProConfig();
-        private string progDataDir = @"C:\ProgramData\UDisplay";
+        private string progDataDir = EngineUpdate.InstallDir;
+        private bool applying;
         private string appDir;
 
         private Button[] navTabs = new Button[3];
@@ -326,9 +327,10 @@ namespace UDisplayPro
 
         private SegmentedSelect segColorMode, segColorTemp;
         private Slider sldBrightness, sldContrast, sldSaturation, sldGamma;
+        private Slider sldVibrance, sldSharpness, sldEdgeSmoothing;
+        private SegmentedSelect segCaptureFps;
         private TextBlock lblBrightnessVal, lblContrastVal, lblSaturationVal, lblGammaVal;
 
-        private SegmentedSelect segFps, segEncoder, segBitrate, segThreads, segRefresh, segCapture;
 
         private TextBlock lblHeaderBadge;
         private TextBlock lblDiagAdapter, lblDiagProcs, lblDiagPatch;
@@ -344,22 +346,30 @@ namespace UDisplayPro
                 string localIni = Path.Combine(appDir, "UDisplayPro.ini");
                 if (File.Exists(localIni)) iniPath = localIni;
             }
-            cfg.Load(iniPath);
-
+            try
+            {
+                if (File.Exists(iniPath) && File.ReadAllText(iniPath).Contains("FormatVersion=2")) cfg.Load(iniPath);
+            }
+            catch (Exception ex) { cfg = new ProConfig(); MessageBox.Show(ex.Message, "Configuração inválida"); }
             BuildWindow();
             LoadConfigToUI();
             UpdateLiveStatus();
 
-            statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
-            statusTimer.Tick += (s, e) => UpdateLiveStatus();
+            statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            statusTimer.Tick += (s, e) => { if (WindowState != WindowState.Minimized && !applying) UpdateLiveStatus(); };
             statusTimer.Start();
+            this.Closing += (sender, e) => { if (applying) e.Cancel = true; };
+            this.Closed += (sender, e) => statusTimer.Stop();
+            this.Loaded += (sender, e) => {
+                if (File.Exists(Path.Combine(progDataDir,"UDisplayPro.pending"))) RunWorker("--recover", null);
+            };
         }
 
         private void BuildWindow()
         {
             this.Title = "UDisplay Pro — Central de Configuração e Calibração (Lemorele LC06 Plus)";
             this.Width = 880;
-            this.Height = 695;
+            this.Height = 795;
             this.MinWidth = 820;
             this.MinHeight = 660;
             this.WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -406,14 +416,14 @@ namespace UDisplayPro
             StackPanel headerLeft = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             TextBlock tbMainTitle = new TextBlock
             {
-                Text = "UDisplay Pro — Calibração de Imagem, 60 FPS e Zero-Latency",
+                Text = "UDisplay Pro — Calibração de Imagem e Recuperação",
                 FontSize = 17,
                 FontWeight = FontWeights.Bold,
                 Foreground = ModernUI.AccentBlue
             };
             TextBlock tbSubTitle = new TextBlock
             {
-                Text = "Adaptador USB-C Lemorele LC06 Plus • Shaders Direct3D 11 BT.709 • Resposta Instantânea de Mouse",
+                Text = "Ajustes de cor com backup e reversão automática • Motor original preservado",
                 FontSize = 12,
                 Foreground = ModernUI.TextMuted,
                 Margin = new Thickness(0, 3, 0, 0)
@@ -433,7 +443,7 @@ namespace UDisplayPro
             };
             lblHeaderBadge = new TextBlock
             {
-                Text = "● 60 FPS Ativo",
+                Text = "Verificando processos...",
                 Foreground = ModernUI.AccentGreen,
                 FontSize = 12.5,
                 FontWeight = FontWeights.SemiBold
@@ -457,7 +467,7 @@ namespace UDisplayPro
             UniformGrid navGrid = new UniformGrid { Rows = 1, Columns = 3 };
             string[] tabNames = new string[] {
                 "1. Calibração de Cor e Contraste",
-                "2. Desempenho, 60 FPS e Latência",
+                "2. Captura e Desempenho",
                 "3. Monitores, Diagnóstico e Sistema"
             };
             for (int i = 0; i < 3; i++)
@@ -520,7 +530,7 @@ namespace UDisplayPro
 
             StackPanel footerBtns = new StackPanel { Orientation = Orientation.Horizontal };
             Button btnDefault = ModernUI.CreateCustomButton(
-                "Restaurar Padrão Otimizado",
+                "Perfil Natural",
                 ModernUI.SecondaryBtnBg,
                 ModernUI.TextPrimary,
                 ModernUI.SecondaryBtnBorder,
@@ -577,14 +587,15 @@ namespace UDisplayPro
             StackPanel sp = new StackPanel();
 
             // Card 1: Presets
-            UniformGrid presetGrid = new UniformGrid { Rows = 1, Columns = 4 };
+            UniformGrid presetGrid = new UniformGrid { Rows = 1, Columns = 5 };
             string[] presetNames = new string[] {
                 "Padrão Natural (HDMI)",
-                "Escritório / Texto Suave",
-                "Cinema / Vídeo",
-                "Modo Leitura (Quente)"
+                "Texto Nítido",
+                "Vivo e Nítido",
+                "Modo Leitura (Quente)",
+                "Bordas Suaves"
             };
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < presetNames.Length; i++)
             {
                 int pIdx = i;
                 Button b = ModernUI.CreateCustomButton(
@@ -607,21 +618,21 @@ namespace UDisplayPro
             // Card 2: Color Space & Color Temp
             StackPanel spMatrix = new StackPanel();
             segColorMode = new SegmentedSelect(new string[] {
-                "BT.709 HDMI (16-235) ★",
-                "BT.709 PC Completo (0-255)",
-                "BT.601 Legado (16-235)"
+                "BT.709 Limitado",
+                "BT.709 Completo",
+                "BT.601 Limitado ★"
             });
             segColorTemp = new SegmentedSelect(new string[] {
-                "6500K Neutro ★",
-                "5500K Conforto",
-                "4500K Quente",
-                "7500K Frio"
+                "Neutro (sem ganho)",
+                "Quente suave",
+                "Quente",
+                "Frio suave"
             });
             spMatrix.Children.Add(ModernUI.CreateLabeledRow("Espaço de Cor HDMI:", segColorMode, false));
             spMatrix.Children.Add(ModernUI.CreateLabeledRow("Temperatura de Cor:", segColorTemp, true));
             sp.Children.Add(ModernUI.CreateCard(
                 "Matriz de Cor HDMI e Temperatura (Balanço RGB)",
-                "O modo BT.709 HDMI (16-235) evita que áreas escuras fiquem pretas demais e brancos estourem.",
+                "Comece em BT.601 limitado. A matriz/faixa precisa corresponder ao decodificador; compare com o padrão de teste.",
                 spMatrix));
 
             // Card 3: Sliders
@@ -635,9 +646,17 @@ namespace UDisplayPro
             spSliders.Children.Add(CreateSliderRow("Correção Gamma (Meios-Tons):", 75, 140, 100, out sldGamma, out lblGammaVal,
                 v => (v / 100.0).ToString("0.00", CultureInfo.InvariantCulture), true));
 
+            TextBlock unusedLabel;
+            spSliders.Children.Add(CreateSliderRow("Vivacidade Seletiva:", 0, 40, 0, out sldVibrance, out unusedLabel,
+                v => Math.Round(v) + "%", false));
+            spSliders.Children.Add(CreateSliderRow("Nitidez de Detalhes:", 0, 50, 0, out sldSharpness, out unusedLabel,
+                v => Math.Round(v) + "%", false));
+            spSliders.Children.Add(CreateSliderRow("Suavização de Bordas:", 0, 50, 0, out sldEdgeSmoothing, out unusedLabel,
+                v => Math.Round(v) + "%", true));
+
             sp.Children.Add(ModernUI.CreateCard(
                 "Ajuste Fino nos Pixel Shaders Direct3D 11 (Processado na GPU)",
-                "Estes ajustes são compilados diretamente no shader HLSL ps_5_0 da placa de vídeo sem custo de CPU.",
+                "Para serrilhado, teste Bordas Suaves. Nitidez alta pode acentuá-lo; zero desliga cada filtro.",
                 spSliders));
 
             return sp;
@@ -646,62 +665,15 @@ namespace UDisplayPro
         private UIElement BuildPerfPage()
         {
             StackPanel sp = new StackPanel();
-
-            StackPanel spVideo = new StackPanel();
-            segFps = new SegmentedSelect(new string[] {
-                "30 FPS",
-                "45 FPS",
-                "60 FPS (Ideal ★)",
-                "75 FPS",
-                "90 FPS"
-            });
-            segEncoder = new SegmentedSelect(new string[] {
-                "CPU x264 Zero-Latency (Sem Atraso ★)",
-                "GPU Hardware (Intel QuickSync / NVIDIA)"
-            });
-            segBitrate = new SegmentedSelect(new string[] {
-                "8 Mbps (Leve)",
-                "16 Mbps (Padrão)",
-                "24 Mbps (Nítido ★)",
-                "32 Mbps (Máximo)"
-            });
-
-            spVideo.Children.Add(ModernUI.CreateLabeledRow("Taxa de Quadros (FPS):", segFps, false));
-            spVideo.Children.Add(ModernUI.CreateLabeledRow("Codificador de Vídeo H.264:", segEncoder, false));
-            spVideo.Children.Add(ModernUI.CreateLabeledRow("Taxa de Bits (Nitidez):", segBitrate, true));
-
-            sp.Children.Add(ModernUI.CreateCard(
-                "Fluidez de Vídeo (FPS), Codificador e Nitidez",
-                "O modo 'CPU x264 Zero-Latency' elimina a fila de reordenação de 2 quadros do chip, zerando o atraso de clique.",
-                spVideo));
-
-            StackPanel spLatency = new StackPanel();
-            segThreads = new SegmentedSelect(new string[] {
-                "2 Threads",
-                "4 Threads (Ideal ★)",
-                "6 Threads",
-                "8 Threads"
-            });
-            segRefresh = new SegmentedSelect(new string[] {
-                "50 ms (Ultra)",
-                "80 ms (Ideal ★)",
-                "200 ms (Médio)",
-                "500 ms (Leve)"
-            });
-            segCapture = new SegmentedSelect(new string[] {
-                "Direct3D 11 Desktop Duplication (GPU ★)",
-                "Modo Compatibilidade GDI"
-            });
-
-            spLatency.Children.Add(ModernUI.CreateLabeledRow("Threads do Codificador CPU:", segThreads, false));
-            spLatency.Children.Add(ModernUI.CreateLabeledRow("Resposta de Hover / Clique:", segRefresh, false));
-            spLatency.Children.Add(ModernUI.CreateLabeledRow("API de Captura do Windows:", segCapture, true));
-
-            sp.Children.Add(ModernUI.CreateCard(
-                "Tempo de Resposta de Foco do Mouse e Captura",
-                "Controla a velocidade de atualização imediata quando o mouse passa sobre botões ou menus.",
-                spLatency));
-
+            segCaptureFps = new SegmentedSelect(new[] {"30 FPS — original", "45 FPS — teste", "60 FPS — teste"});
+            sp.Children.Add(ModernUI.CreateCard("Alvo de Captura",
+                "45/60 são experimentais. O valor solicitado não mede a taxa entregue pelo adaptador.", segCaptureFps));
+            sp.Children.Add(ModernUI.CreateCard("Equilíbrio entre Fluidez e Definição", null,
+                new TextBlock { Foreground=ModernUI.TextPrimary, TextWrapping=TextWrapping.Wrap, FontSize=14, LineHeight=23,
+                    Text="30 FPS prioriza margem para compressão e processamento. 45/60 podem melhorar movimento, mas também aumentar uso de CPU/GPU e reduzir qualidade por quadro. Compare rolagem de texto e vídeo antes de confirmar.\n\nNitidez 15–25% é um ponto de partida. O filtro usa amostras extras somente no plano de luminosidade; em zero, essas leituras são removidas do shader. Não cria resolução extra nem recupera detalhes já perdidos na compressão." }));
+            sp.Children.Add(ModernUI.CreateCard("O que foi preservado", null,
+                new TextBlock { Foreground=ModernUI.TextMuted, TextWrapping=TextWrapping.Wrap, FontSize=13, LineHeight=22,
+                    Text="Seleção automática de encoder, bitrate negociado com o adaptador, driver e firmware permanecem originais. Os antigos patches de threads/bitrate não foram reutilizados.\n\nPara texto: use a resolução nativa do monitor e evite espelhamento entre telas de resoluções diferentes. A subamostragem de cores 4:2:0 continua limitando bordas de texto colorido." }));
             return sp;
         }
 
@@ -739,9 +711,9 @@ namespace UDisplayPro
                 Foreground = ModernUI.TextMuted,
                 FontSize = 12.2,
                 LineHeight = 19,
-                Text = "✔ Shaders D3D11 BT.709 ativos (Fim do contraste estourado e saturação excessiva)\n" +
-                       "✔ 60 FPS reais + Zero-Latency Constrained Baseline (Sem atraso ao passar/clicar o mouse)\n" +
-                       "✔ Loop OTA de 5s desativado, telemetria bloqueada e ícone da bandeja vinculado ao novo painel"
+                Text = "A presença de processos não comprova a imagem no monitor.\n" +
+                       "Após aplicar, confirme a imagem em até 25 segundos; caso contrário, o sistema reverte.\n" +
+                       "Os ajustes de matriz/faixa são experimentais até a confirmação visual no adaptador."
             };
 
             spStatus.Children.Add(lblDiagAdapter);
@@ -758,23 +730,20 @@ namespace UDisplayPro
             UniformGrid maintGrid = new UniformGrid { Rows = 1, Columns = 3 };
             Button bRestart = ModernUI.CreateCustomButton("Reiniciar Monitor USB-C Agora", new SolidColorBrush(Color.FromRgb(20, 83, 60)), Brushes.White, new SolidColorBrush(Color.FromRgb(52, 211, 153)), 6, new Thickness(0, 0, 6, 0), 38);
             Button bInstall = ModernUI.CreateCustomButton("Instalar Driver + App neste PC", ModernUI.PrimaryBtnBg, Brushes.White, ModernUI.PrimaryBtnBorder, 6, new Thickness(6, 0, 6, 0), 38);
-            Button bRestore = ModernUI.CreateCustomButton("Restaurar Padrão Otimizado", new SolidColorBrush(Color.FromRgb(15, 23, 42)), ModernUI.TextPrimary, ModernUI.SecondaryBtnBorder, 6, new Thickness(6, 0, 0, 0), 38);
+            Button bRestore = ModernUI.CreateCustomButton("Recuperar Original de Fábrica", new SolidColorBrush(Color.FromRgb(15, 23, 42)), ModernUI.TextPrimary, ModernUI.SecondaryBtnBorder, 6, new Thickness(6, 0, 0, 0), 38);
 
-            bRestart.Click += (s, e) => {
-                lblFooter.Text = "Reiniciando captura de vídeo do monitor USB-C...";
-                RestartUDisplayProcesses();
-                lblFooter.Text = "Monitor USB-C reiniciado com sucesso!";
-            };
-            bInstall.Click += (s, e) => InstallOnThisComputer();
-            bRestore.Click += (s, e) => { ApplyPreset(0); SaveAndApplyAll(); };
+            bRestart.Click += (s, e) => RunWorker("--restart", null);
+            bInstall.Content = "Abrir Padrão de Teste";
+            bInstall.Click += (s, e) => CalibrationWindow.ShowPattern();
+            bRestore.Click += (s, e) => RunWorker("--restore", null);
 
             maintGrid.Children.Add(bRestart);
             maintGrid.Children.Add(bInstall);
             maintGrid.Children.Add(bRestore);
 
             sp.Children.Add(ModernUI.CreateCard(
-                "Manutenção e Instalação em Outros Computadores",
-                "Ao copiar esta pasta para outro computador, clique em 'Instalar Driver + App neste PC' para configurar tudo automaticamente.",
+                "Recuperação e Verificação da Imagem",
+                "Recuperar Original mantém o driver instalado e restaura somente o aplicativo de fábrica.",
                 maintGrid));
 
             return sp;
@@ -844,52 +813,11 @@ namespace UDisplayPro
 
         private void ApplyPreset(int preset)
         {
-            if (preset == 0) // Padrão Natural (HDMI)
-            {
-                segColorMode.SelectedIndex = 0;
-                segColorTemp.SelectedIndex = 0;
-                sldBrightness.Value = 0;
-                sldContrast.Value = 100;
-                sldSaturation.Value = 100;
-                sldGamma.Value = 100;
-                segFps.SelectedIndex = 2;       // 60 FPS
-                segEncoder.SelectedIndex = 0;   // CPU Zero-Latency
-                segBitrate.SelectedIndex = 2;   // 24 Mbps
-                segThreads.SelectedIndex = 1;   // 4 Threads
-                segRefresh.SelectedIndex = 1;   // 80 ms
-                segCapture.SelectedIndex = 0;
-                lblFooter.Text = "Perfil 'Padrão Natural (HDMI 60Hz)' selecionado. Clique em Aplicar!";
-            }
-            else if (preset == 1) // Escritório / Texto Suave
-            {
-                segColorMode.SelectedIndex = 0;
-                segColorTemp.SelectedIndex = 1; // 5500K
-                sldBrightness.Value = -2;
-                sldContrast.Value = 94;
-                sldSaturation.Value = 92;
-                sldGamma.Value = 105;
-                lblFooter.Text = "Perfil 'Escritório / Texto Suave' selecionado. Clique em Aplicar!";
-            }
-            else if (preset == 2) // Cinema / Vídeo
-            {
-                segColorMode.SelectedIndex = 0;
-                segColorTemp.SelectedIndex = 0;
-                sldBrightness.Value = 0;
-                sldContrast.Value = 106;
-                sldSaturation.Value = 108;
-                sldGamma.Value = 106;
-                lblFooter.Text = "Perfil 'Cinema / Vídeo' selecionado. Clique em Aplicar!";
-            }
-            else if (preset == 3) // Modo Leitura (Quente)
-            {
-                segColorMode.SelectedIndex = 0;
-                segColorTemp.SelectedIndex = 2; // 4500K
-                sldBrightness.Value = -5;
-                sldContrast.Value = 90;
-                sldSaturation.Value = 88;
-                sldGamma.Value = 105;
-                lblFooter.Text = "Perfil 'Modo Leitura (Filtro de Luz Azul)' selecionado. Clique em Aplicar!";
-            }
+            int fps = new[] {30,45,60}[segCaptureFps.SelectedIndex];
+            cfg = ImageProfiles.Create(preset,segColorMode.SelectedIndex,fps);
+            LoadConfigToUI();
+            string[] names = {"Natural", "Texto Nítido", "Vivo e Nítido", "Leitura", "Bordas Suaves"};
+            lblFooter.Text="Perfil '"+names[preset]+"' selecionado. Clique em Aplicar para comparar.";
         }
 
         private void LoadConfigToUI()
@@ -900,31 +828,11 @@ namespace UDisplayPro
             sldContrast.Value = cfg.Contrast;
             sldSaturation.Value = cfg.Saturation;
             sldGamma.Value = cfg.GammaX100;
+            sldVibrance.Value = cfg.Vibrance;
+            sldSharpness.Value = cfg.Sharpness;
+            sldEdgeSmoothing.Value = cfg.EdgeSmoothing;
+            segCaptureFps.SelectedIndex = cfg.CaptureFps==60 ? 2 : (cfg.CaptureFps==45 ? 1 : 0);
 
-            if (cfg.TargetFps <= 30) segFps.SelectedIndex = 0;
-            else if (cfg.TargetFps <= 45) segFps.SelectedIndex = 1;
-            else if (cfg.TargetFps <= 60) segFps.SelectedIndex = 2;
-            else if (cfg.TargetFps <= 75) segFps.SelectedIndex = 3;
-            else segFps.SelectedIndex = 4;
-
-            segEncoder.SelectedIndex = cfg.EncoderMode == 1 ? 1 : 0;
-
-            if (cfg.BitrateMbps <= 8) segBitrate.SelectedIndex = 0;
-            else if (cfg.BitrateMbps <= 16) segBitrate.SelectedIndex = 1;
-            else if (cfg.BitrateMbps <= 24) segBitrate.SelectedIndex = 2;
-            else segBitrate.SelectedIndex = 3;
-
-            if (cfg.CpuThreads <= 2) segThreads.SelectedIndex = 0;
-            else if (cfg.CpuThreads <= 4) segThreads.SelectedIndex = 1;
-            else if (cfg.CpuThreads <= 6) segThreads.SelectedIndex = 2;
-            else segThreads.SelectedIndex = 3;
-
-            if (cfg.StaticRefreshMs <= 50) segRefresh.SelectedIndex = 0;
-            else if (cfg.StaticRefreshMs <= 80) segRefresh.SelectedIndex = 1;
-            else if (cfg.StaticRefreshMs <= 200) segRefresh.SelectedIndex = 2;
-            else segRefresh.SelectedIndex = 3;
-
-            segCapture.SelectedIndex = cfg.CompatGdiMode ? 1 : 0;
         }
 
         private void ReadUIToConfig()
@@ -935,354 +843,89 @@ namespace UDisplayPro
             cfg.Contrast = (int)Math.Round(sldContrast.Value);
             cfg.Saturation = (int)Math.Round(sldSaturation.Value);
             cfg.GammaX100 = (int)Math.Round(sldGamma.Value);
+            cfg.Vibrance = (int)Math.Round(sldVibrance.Value);
+            cfg.Sharpness = (int)Math.Round(sldSharpness.Value);
+            cfg.EdgeSmoothing = (int)Math.Round(sldEdgeSmoothing.Value);
+            cfg.CaptureFps = new[] {30,45,60}[segCaptureFps.SelectedIndex];
 
-            int[] fpsMap = new int[] { 30, 45, 60, 75, 90 };
-            cfg.TargetFps = fpsMap[segFps.SelectedIndex];
-            cfg.EncoderMode = segEncoder.SelectedIndex;
-
-            int[] brMap = new int[] { 8, 16, 24, 32 };
-            cfg.BitrateMbps = brMap[segBitrate.SelectedIndex];
-
-            int[] thMap = new int[] { 2, 4, 6, 8 };
-            cfg.CpuThreads = thMap[segThreads.SelectedIndex];
-
-            int[] refMap = new int[] { 50, 80, 200, 500 };
-            cfg.StaticRefreshMs = refMap[segRefresh.SelectedIndex];
-
-            cfg.CompatGdiMode = (segCapture.SelectedIndex == 1);
-        }
-
-        private void CompileCustomShaders(out byte[] yShader, out byte[] uvShader)
-        {
-            double yr, yg, yb, yBaseOff;
-            double ur, ug, ub;
-            double vr, vg, vb;
-
-            if (cfg.ColorMode == 1) // BT.709 Full Range
-            {
-                yr = 0.2126; yg = 0.7152; yb = 0.0722; yBaseOff = 0.0;
-                ur = -0.114572; ug = -0.385428; ub = 0.500000;
-                vr = 0.500000; vg = -0.454153; vb = -0.045847;
-            }
-            else if (cfg.ColorMode == 2) // BT.601 Limited
-            {
-                yr = 0.256788; yg = 0.504129; yb = 0.097906; yBaseOff = 0.0627451;
-                ur = -0.148223; ug = -0.290993; ub = 0.439216;
-                vr = 0.439216; vg = -0.367788; vb = -0.071427;
-            }
-            else // BT.709 Limited Range (16..235)
-            {
-                yr = 0.182586; yg = 0.614231; yb = 0.062007; yBaseOff = 0.0627451;
-                ur = -0.100644; ug = -0.338572; ub = 0.439216;
-                vr = 0.439216; vg = -0.398942; vb = -0.040274;
-            }
-
-            double tr = 1.0, tg = 1.0, tb = 1.0;
-            if (cfg.ColorTemp == 1) { tr = 1.00; tg = 0.96; tb = 0.87; }
-            else if (cfg.ColorTemp == 2) { tr = 1.00; tg = 0.90; tb = 0.76; }
-            else if (cfg.ColorTemp == 3) { tr = 0.93; tg = 0.97; tb = 1.04; }
-
-            double c = cfg.Contrast / 100.0;
-            double b = cfg.Brightness / 100.0;
-            double s = cfg.Saturation / 100.0;
-            double gamma = cfg.GammaX100 / 100.0;
-
-            double fyr = yr * tr * c;
-            double fyg = yg * tg * c;
-            double fyb = yb * tb * c;
-            double ySum = yr + yg + yb;
-            double fyOff = yBaseOff + ySum * (0.5 * (1.0 - c) + b);
-
-            double fur = ur * tr * c * s;
-            double fug = ug * tg * c * s;
-            double fub = ub * tb * c * s;
-
-            double fvr = vr * tr * c * s;
-            double fvg = vg * tg * c * s;
-            double fvb = vb * tb * c * s;
-
-            CultureInfo inv = CultureInfo.InvariantCulture;
-            string sampleExpr = "saturate(tx.Sample(sam, inp.uv).xyz)";
-            if (Math.Abs(gamma - 1.0) > 0.005)
-            {
-                sampleExpr = string.Format(inv, "pow(max({0}, 0.0001), {1:F4})", sampleExpr, gamma);
-            }
-
-            string hlslY = string.Format(inv, @"
-Texture2D tx : register(t0);
-SamplerState sam : register(s0);
-struct PS_IN {{ float4 pos : SV_POSITION; float2 uv : TEXCOORD0; }};
-float4 main(PS_IN inp) : SV_Target {{
-    float3 rgb = {0};
-    float y = dot(rgb, float3({1:F6}, {2:F6}, {3:F6})) + {4:F6};
-    return float4(saturate(y), 0.0, 0.0, 1.0);
-}}", sampleExpr, fyr, fyg, fyb, fyOff);
-
-            string hlslUV = string.Format(inv, @"
-Texture2D tx : register(t0);
-SamplerState sam : register(s0);
-struct PS_IN {{ float4 pos : SV_POSITION; float2 uv : TEXCOORD0; }};
-float2 main(PS_IN inp) : SV_Target {{
-    float3 rgb = {0};
-    float u = dot(rgb, float3({1:F6}, {2:F6}, {3:F6})) + 0.5019608;
-    float v = dot(rgb, float3({4:F6}, {5:F6}, {6:F6})) + 0.5019608;
-    return saturate(float2(u, v));
-}}", sampleExpr, fur, fug, fub, fvr, fvg, fvb);
-
-            yShader = D3DShaderCompiler.CompilePS(hlslY);
-            uvShader = D3DShaderCompiler.CompilePS(hlslUV);
-        }
-
-        private void PatchBinaryFile(string exePath, byte[] yShader, byte[] uvShader)
-        {
-            if (!File.Exists(exePath)) return;
-            FileInfo fi = new FileInfo(exePath);
-            if (fi.IsReadOnly) fi.IsReadOnly = false;
-
-            byte[] bin = File.ReadAllBytes(exePath);
-
-            for (int k = 0; k < 704; k++) bin[0x4E8FF0 + k] = 0;
-            Array.Copy(yShader, 0, bin, 0x4E8FF0, yShader.Length);
-            Array.Copy(BitConverter.GetBytes(yShader.Length), 0, bin, 0x179125, 4);
-
-            for (int k = 0; k < 784; k++) bin[0x4E8CE0 + k] = 0;
-            Array.Copy(uvShader, 0, bin, 0x4E8CE0, uvShader.Length);
-            Array.Copy(BitConverter.GetBytes(uvShader.Length), 0, bin, 0x1791A0, 4);
-
-            Array.Copy(BitConverter.GetBytes(cfg.TargetFps), 0, bin, 0x0B0F2A, 4);
-            Array.Copy(BitConverter.GetBytes(960), 0, bin, 0x176A2E, 4);
-
-            bin[0x15EC85] = (cfg.EncoderMode == 0) ? (byte)0xEB : (byte)0x75;
-            bin[0x15F698] = 0x20;
-            bin[0x15F714] = 0x00;
-            Array.Copy(BitConverter.GetBytes(cfg.StaticRefreshMs), 0, bin, 0x15F7A5, 4);
-
-            int bps = cfg.BitrateMbps * 1000000;
-            Array.Copy(BitConverter.GetBytes(bps), 0, bin, 0x0B0C4D, 4);
-
-            Array.Copy(BitConverter.GetBytes(cfg.CpuThreads), 0, bin, 0x189316, 4);
-            Array.Copy(BitConverter.GetBytes(cfg.CpuThreads), 0, bin, 0x189323, 4);
-
-            File.WriteAllBytes(exePath, bin);
         }
 
         private void SaveAndApplyAll()
         {
+            if (applying) return;
             try
             {
                 ReadUIToConfig();
-                lblFooter.Text = "Compilando Pixel Shaders D3D11 e atualizando monitor...";
-                byte[] yShader, uvShader;
-                CompileCustomShaders(out yShader, out uvShader);
-
-                string sysIni = Path.Combine(progDataDir, "UDisplayPro.ini");
-                cfg.Save(sysIni);
-
-                if (Directory.Exists(progDataDir))
-                {
-                    string globalIni = Path.Combine(progDataDir, "GlobalConfig.ini");
-                    File.WriteAllText(globalIni, "[Global]\r\nisPopUp=false\r\nIsCompatMode=" + (cfg.CompatGdiMode ? "true" : "false") + "\r\n", Encoding.ASCII);
-
-                    foreach (string devIni in Directory.GetFiles(progDataDir, "UD*.ini"))
-                    {
-                        string content = File.ReadAllText(devIni);
-                        if (content.Contains("quality=0"))
-                        {
-                            content = content.Replace("quality=0", "quality=1");
-                            File.WriteAllText(devIni, content, Encoding.ASCII);
-                        }
-                    }
-                }
-
-                StopUDisplayProcesses();
-
-                string sysExe = Path.Combine(progDataDir, "UDisplay.exe");
-                string localExe = Path.Combine(appDir, "UDisplay.exe");
-
-                if (File.Exists(localExe) && !string.Equals(Path.GetFullPath(localExe), Path.GetFullPath(sysExe), StringComparison.OrdinalIgnoreCase))
-                {
-                    PatchBinaryFile(localExe, yShader, uvShader);
-                    if (Directory.Exists(progDataDir))
-                    {
-                        FileInfo fi = new FileInfo(sysExe);
-                        if (fi.Exists && fi.IsReadOnly) fi.IsReadOnly = false;
-                        File.Copy(localExe, sysExe, true);
-                    }
-                }
-                else if (File.Exists(sysExe))
-                {
-                    PatchBinaryFile(sysExe, yShader, uvShader);
-                }
-
-                StartUDisplayProcesses();
-                UpdateLiveStatus();
-
-                lblFooter.Text = string.Format("Aplicado com sucesso! ({0} FPS • {1} Mbps • Brilho {2}% • Contraste {3}% • Saturação {4}%)",
-                    cfg.TargetFps, cfg.BitrateMbps, cfg.Brightness, cfg.Contrast, cfg.Saturation);
+                string pending = Path.Combine(Path.GetTempPath(),"UDisplayPro-"+Guid.NewGuid().ToString("N")+".ini");
+                cfg.Save(pending);
+                RunWorker("--apply", pending);
             }
-            catch (Exception ex)
+            catch(Exception ex) { MessageBox.Show(ex.Message,"Falha antes de aplicar",MessageBoxButton.OK,MessageBoxImage.Error); }
+        }
+
+        private async void RunWorker(string mode, string settings)
+        {
+            if (applying) return;
+            applying=true;
+            ((UIElement)this.Content).IsEnabled=false;
+            lblFooter.Text="Atualizando com backup. Aguarde a confirmação da imagem...";
+            try
             {
-                MessageBox.Show("Erro ao aplicar configurações:\n" + ex.Message, "UDisplay Pro", MessageBoxButton.OK, MessageBoxImage.Error);
+                if(mode=="--apply")
+                {
+                    lblFooter.Text="Validando ajustes e compilando shaders...";
+                    await Task.Run(()=> {
+                        ProConfig staged = new ProConfig(); staged.Load(settings);
+                        SafePatcher.Build(SafePatcher.Original(EngineUpdate.OriginalPath),staged);
+                    });
+                }
+                string args=mode+(settings==null ? "" : " \""+settings+"\"");
+                using(Process worker=Process.Start(new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName,args) {
+                    UseShellExecute=true,Verb="runas",WorkingDirectory=appDir }))
+                {
+                    await Task.Run(()=>worker.WaitForExit());
+                    if(worker.ExitCode==0) lblFooter.Text="Operação concluída. Confira a imagem do monitor.";
+                    else if(worker.ExitCode==2) lblFooter.Text="Ajustes revertidos; versão anterior recuperada.";
+                    else throw new IOException("A atualização falhou. Consulte "+EngineUpdate.LogPath);
+                }
+                UpdateLiveStatus();
+            }
+            catch(Exception ex) { lblFooter.Text="Operação não concluída."; MessageBox.Show(ex.Message,"UDisplay Pro",MessageBoxButton.OK,MessageBoxImage.Error); }
+            finally
+            {
+                try { if(settings!=null && File.Exists(settings)) File.Delete(settings); }
+                catch(IOException) { }
+                catch(UnauthorizedAccessException) { }
+                applying=false; ((UIElement)this.Content).IsEnabled=true;
             }
         }
 
         private void SetWindowsDisplayMode(string arg, string msg)
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo("DisplaySwitch.exe", arg) { UseShellExecute = true });
-                lblFooter.Text = msg;
-            }
-            catch { }
-        }
-
-        private void StopUDisplayProcesses()
-        {
-            foreach (Process p in Process.GetProcessesByName("UDisplay"))
-            {
-                try { p.Kill(); p.WaitForExit(2000); } catch { }
-            }
-            Thread.Sleep(300);
-        }
-
-        private void StartUDisplayProcesses()
-        {
-            string sysExe = Path.Combine(progDataDir, "UDisplay.exe");
-            if (!File.Exists(sysExe)) sysExe = Path.Combine(appDir, "UDisplay.exe");
-            if (!File.Exists(sysExe)) return;
-
-            try
-            {
-                Process.Start(new ProcessStartInfo(sysExe, "daemon")
-                {
-                    WorkingDirectory = Path.GetDirectoryName(sysExe),
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                });
-            }
-            catch { }
-
-            Thread.Sleep(400);
-
-            try
-            {
-                Process.Start(new ProcessStartInfo(sysExe, "main")
-                {
-                    WorkingDirectory = Path.GetDirectoryName(sysExe),
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                });
-            }
-            catch { }
-        }
-
-        private void RestartUDisplayProcesses()
-        {
-            StopUDisplayProcesses();
-            StartUDisplayProcesses();
-            Thread.Sleep(700);
-            UpdateLiveStatus();
-        }
-
-        private void InstallOnThisComputer()
-        {
-            try
-            {
-                lblFooter.Text = "Instalando driver virtual e UDisplay Pro neste computador...";
-                Directory.CreateDirectory(progDataDir);
-                string localExe = Path.Combine(appDir, "UDisplay.exe");
-                string sysExe = Path.Combine(progDataDir, "UDisplay.exe");
-
-                StopUDisplayProcesses();
-
-                if (File.Exists(localExe) && !string.Equals(Path.GetFullPath(localExe), Path.GetFullPath(sysExe), StringComparison.OrdinalIgnoreCase))
-                {
-                    FileInfo fi = new FileInfo(sysExe);
-                    if (fi.Exists && fi.IsReadOnly) fi.IsReadOnly = false;
-                    File.Copy(localExe, sysExe, true);
-                }
-
-                string curCfgExe = Process.GetCurrentProcess().MainModule.FileName;
-                string sysCfgExe = Path.Combine(progDataDir, "UDisplayConfig.exe");
-                if (!string.Equals(Path.GetFullPath(curCfgExe), Path.GetFullPath(sysCfgExe), StringComparison.OrdinalIgnoreCase))
-                {
-                    try { File.Copy(curCfgExe, sysCfgExe, true); } catch { }
-                }
-
-                try
-                {
-                    Process p = Process.Start(new ProcessStartInfo(sysExe, "install_service_and_drv")
-                    {
-                        WorkingDirectory = progDataDir,
-                        UseShellExecute = true,
-                        Verb = "runas",
-                        WindowStyle = ProcessWindowStyle.Hidden
-                    });
-                    if (p != null) p.WaitForExit(25000);
-                }
-                catch { }
-
-                try
-                {
-                    using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
-                    {
-                        if (key != null) key.SetValue("UDisplay", "\"" + sysExe + "\" daemon");
-                    }
-                }
-                catch { }
-
-                SaveAndApplyAll();
-                MessageBox.Show(
-                    "Instalação concluída com sucesso!\n\n" +
-                    "• Driver de Monitor Virtual (SG_DISP_BUS) instalado\n" +
-                    "• UDisplay Pro (60 FPS + BT.709 + Zero-Latency) ativo em C:\\ProgramData\\UDisplay\n" +
-                    "• Inicialização automática com o Windows configurada!",
-                    "UDisplay Pro", MessageBoxButton.OK, MessageBoxImage.Information);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Erro durante a instalação:\n" + ex.Message, "UDisplay Pro", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
+            try { Process.Start(new ProcessStartInfo("DisplaySwitch.exe",arg) { UseShellExecute=true }); lblFooter.Text=msg; }
+            catch(Exception ex) { MessageBox.Show(ex.Message,"Windows"); }
         }
 
         private void UpdateLiveStatus()
         {
             try
             {
-                Process[] procs = Process.GetProcessesByName("UDisplay");
-                lblDiagProcs.Text = string.Format("• Processos em Execução: {0} ({1})",
-                    procs.Length, procs.Length >= 2 ? "Daemon + Captura Principal Ativos" : (procs.Length == 1 ? "1 Processo Ativo" : "Parado"));
-
-                string snFound = "Detectado";
-                if (Directory.Exists(progDataDir))
-                {
-                    string[] inis = Directory.GetFiles(progDataDir, "UD*.ini");
-                    if (inis.Length > 0) snFound = Path.GetFileNameWithoutExtension(inis[0]);
-                }
-                lblDiagAdapter.Text = "• Adaptador USB-C Lemorele LC06 Plus (VID_185B&PID_2D1D): Conectado | Serial: " + snFound;
-
-                string sysExe = Path.Combine(progDataDir, "UDisplay.exe");
-                if (File.Exists(sysExe))
-                {
-                    byte[] b = File.ReadAllBytes(sysExe);
-                    int fps = BitConverter.ToInt32(b, 0x0B0F2A);
-                    bool zeroLat = (b[0x15EC85] == 0xEB);
-                    int bps = BitConverter.ToInt32(b, 0x0B0C4D);
-                    int mbps = (bps > 1000000 && bps <= 100000000) ? (bps / 1000000) : 24;
-                    lblDiagPatch.Text = string.Format("• Motor Ativo: {0} FPS Reais • {1} Mbps • {2}",
-                        fps, mbps, zeroLat ? "CPU x264 Zero-Latency" : "GPU Hardware Encoder");
-                    lblHeaderBadge.Text = string.Format("● {0} FPS • {1} Mbps Ativo", fps, mbps);
-                }
+                int count=0;
+                foreach(Process p in Process.GetProcessesByName("UDisplay")) using(p) { count++; }
+                lblDiagProcs.Text="• Processos UDisplay encontrados: "+count+" (não mede FPS nem confirma imagem)";
+                lblDiagAdapter.Text="• Conexão do adaptador: verifique a imagem e as configurações de exibição do Windows.";
+                lblDiagPatch.Text="• Cores/nitidez na GPU; alvo de captura ajustável. FPS real não medido.";
+                lblHeaderBadge.Text=count>0 ? "● UDisplay em execução" : "● UDisplay parado";
             }
-            catch { }
+            catch(Exception ex) { lblHeaderBadge.Text="Diagnóstico indisponível"; lblDiagProcs.Text=ex.Message; }
         }
 
         public void ExportScreenshots(string outDir)
         {
             Directory.CreateDirectory(outDir);
             FrameworkElement rootEl = (FrameworkElement)this.Content;
-            double w = 880;
-            double h = 665;
+            double w = 864;
+            double h = 756;
 
             for (int t = 0; t < 3; t++)
             {
@@ -1313,6 +956,34 @@ float2 main(PS_IN inp) : SV_Target {{
         [STAThread]
         static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0]=="--install")
+            {
+                try
+                {
+                    using(Process worker=Process.Start(new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName,"--install-tray") {UseShellExecute=true,Verb="runas"}))
+                    {
+                        worker.WaitForExit();
+                        if(worker.ExitCode!=0) {Environment.ExitCode=worker.ExitCode;return;}
+                    }
+                }
+                catch(Exception ex) {Environment.ExitCode=1;MessageBox.Show(ex.Message,"Instalação do painel");return;}
+            }
+            if (args.Length > 0 && (args[0]=="--apply" || args[0]=="--restore" || args[0]=="--restart" || args[0]=="--recover" || args[0]=="--test-rollback" || args[0]=="--install-tray"))
+            {
+                try { Environment.ExitCode=EngineUpdate.Run(args[0],args.Length>1?args[1]:null); }
+                catch(Exception ex) { Environment.ExitCode=1; MessageBox.Show(ex.Message+"\n\nLog: "+EngineUpdate.LogPath,"Falha de atualização",MessageBoxButton.OK,MessageBoxImage.Error); }
+                return;
+            }
+            if (args.Length >= 3 && args[0]=="--build")
+            {
+                try {
+                    if (string.Equals(Path.GetFullPath(args[1]),Path.GetFullPath(args[2]),StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("A saída não pode substituir o original.");
+                    ProConfig cfg=new ProConfig(); if(args.Length>3)cfg.Load(args[3]);
+                    File.WriteAllBytes(args[2],SafePatcher.Build(SafePatcher.Original(args[1]),cfg));
+                } catch(Exception ex) { Environment.ExitCode=1; File.WriteAllText(args[2]+".error.txt",ex.ToString()); }
+                return;
+            }
             if (args != null && args.Length >= 2 && args[0] == "--screenshot")
             {
                 MainWindow w = new MainWindow();
@@ -1325,7 +996,7 @@ float2 main(PS_IN inp) : SV_Target {{
             {
                 if (!createdNew)
                 {
-                    foreach (Process p in Process.GetProcessesByName("UDisplayConfig"))
+                    foreach (Process p in Process.GetProcessesByName("UDisplayConfig")) using(p)
                     {
                         if (p.Id != Process.GetCurrentProcess().Id && p.MainWindowHandle != IntPtr.Zero)
                         {
