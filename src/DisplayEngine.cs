@@ -213,6 +213,22 @@ float2 main(PS_IN inp) : SV_Target {{
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
+        static string PathOf(Process p)
+        {
+            try { return p.MainModule.FileName; }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // MainModule fails across privilege/bitness boundaries (the engine
+                // runs as a LocalSystem service). Fall back to WMI, which the elevated
+                // worker can read, so an unreadable process neither aborts the whole
+                // stop sweep (the previous behaviour) nor is blindly skipped.
+                using (var q = new System.Management.ManagementObjectSearcher("SELECT ExecutablePath FROM Win32_Process WHERE ProcessId=" + p.Id))
+                using (var r = q.Get())
+                    foreach (System.Management.ManagementObject m in r) using (m)
+                        return m["ExecutablePath"] as string;
+                return null;
+            }
+        }
         static Process[] OwnedProcesses()
         {
             var owned = new System.Collections.Generic.List<Process>();
@@ -220,11 +236,10 @@ float2 main(PS_IN inp) : SV_Target {{
             {
                 try
                 {
-                    if (string.Equals(p.MainModule.FileName,ExePath,StringComparison.OrdinalIgnoreCase)) owned.Add(p);
+                    if (string.Equals(PathOf(p),ExePath,StringComparison.OrdinalIgnoreCase)) owned.Add(p);
                     else p.Dispose();
                 }
-                catch (InvalidOperationException) { p.Dispose(); }
-                catch { p.Dispose(); throw; } // Never silently ignore access denied.
+                catch (InvalidOperationException) { p.Dispose(); } // Process exited during enumeration.
             }
             return owned.ToArray();
         }
@@ -329,7 +344,21 @@ float2 main(PS_IN inp) : SV_Target {{
                     }
                     if(mode=="--recover") return 0;
                     if(mode=="--restart") { Stop(); Start(); Log("Captura reiniciada."); return 0; }
-                    if(!File.Exists(ExePath)) throw new FileNotFoundException("Instale primeiro o driver e o aplicativo original do adaptador.",ExePath);
+                    if(!File.Exists(ExePath))
+                    {
+                        // The engine binary is missing (e.g. removed by antivirus, whose
+                        // scan no longer trusts the patched copy because its Authenticode
+                        // signature was invalidated). Factory restore must still work from
+                        // the verified original, with no running capture to stop and no
+                        // backup to roll back to.
+                        if(mode=="--restore")
+                        {
+                            Stop(); AtomicWrite(ExePath,SafePatcher.Original(OriginalPath)); Start();
+                            string gone=Path.Combine(InstallDir,"UDisplayPro.ini"); if(File.Exists(gone)) File.Delete(gone);
+                            Log("Original reinstalado: o executável estava ausente."); return 0;
+                        }
+                        throw new FileNotFoundException("Instale primeiro o driver e o aplicativo original do adaptador. Para repor apenas o motor de fábrica, use Recuperar Original de Fábrica.",ExePath);
+                    }
                     byte[] original = SafePatcher.Original(OriginalPath);
                     ProConfig cfg = new ProConfig();
                     if(mode=="--apply" || mode=="--test-rollback") { if(!File.Exists(settings)) throw new FileNotFoundException("Configuração ausente."); cfg.Load(settings); }
