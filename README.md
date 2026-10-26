@@ -40,7 +40,7 @@ BT.709 limitado e BT.709 completo continuam disponíveis para comparação. A ma
 
 Os patches antigos de bitrate, threads, OTA e bandeja foram retirados. O padrão continua sendo o alvo original de 30 FPS. A aba Captura e Desempenho oferece **45/60 FPS experimentais**, alterando somente o imediato verificado em `0x0B0F2A`. O alvo solicitado não mede a taxa realmente entregue; pode aumentar carga e reduzir os bits disponíveis por quadro. Essas opções não foram validadas visualmente no monitor do usuário. Não há promessa de latência zero ou bloqueio de telemetria.
 
-Filtros espaciais desligados não adicionam amostras ao shader. Ao ligar nitidez e/ou suavização, o plano Y usa cinco amostras compartilhadas; o plano UV continua sem filtro espacial. A vivacidade aumenta menos cores já saturadas e limita o ganho conjunto dos canais para preservar a tonalidade. O painel compila a pré-validação em segundo plano e tem manifesto de DPI por monitor; isso melhora o comportamento do próprio painel, não altera a escala de outros aplicativos.
+Filtros espaciais desligados não adicionam amostras ao plano Y. Ao ligar nitidez e/ou suavização, o plano Y usa cinco amostras compartilhadas. O plano UV (crominância NV12, metade da resolução) sempre faz a média do bloco 2×2 de origem que cada amostra de cor cobre, em vez de ler um único pixel. Com um sampler "point", a leitura única descartava três de cada quatro pixels de cor e serrilhava bordas coloridas. As quatro leituras ficam nos centros dos texels, então o resultado não depende do filtro do sampler do motor. Nitidez e suavização continuam sem atuar no UV. A vivacidade aumenta menos cores já saturadas e limita o ganho conjunto dos canais para preservar a tonalidade. O painel compila a pré-validação em segundo plano e tem manifesto de DPI por monitor; isso melhora o comportamento do próprio painel, não altera a escala de outros aplicativos.
 
 Na consulta local, o monitor USB (`Sage Display Manager`, `@SG0000`) estava em **1920×1080, 60 Hz**, igual ao modo preferido anunciado. A qualidade original estava em `quality=1`. Isso não mede a resolução interna do vídeo comprimido nem comprova uma causa única do serrilhado. Mais nitidez não é a solução para toda borda irregular.
 
@@ -55,7 +55,7 @@ Windows com .NET Framework 4.8 e `d3dcompiler_47.dll`:
 .\tools\Test.ps1
 ```
 
-`Build.bat` compila o painel, copia o original verificado para `dist\UDisplay.Original.exe` e constrói `dist\UDisplay.exe`. Não modifica a instalação em uso. Os testes cobrem 84 combinações de shaders, 938 verificações de integridade/parâmetros e exportam os shaders para `obj/tests`. Também executam o código x86 da bandeja em três endereços de carga, com 14.137 verificações de caminhos Unicode, limites, retorno ao comportamento original e liberação de handles.
+`Build.bat` compila o painel, copia o original verificado para `dist\UDisplay.Original.exe` e constrói `dist\UDisplay.exe`. Não modifica a instalação em uso. Os testes cobrem 84 combinações de shaders, 944 verificações de integridade/parâmetros e exportam os shaders para `obj/tests`. `ChromaGpuTests` executa seis shaders UV em Direct3D 11 WARP (`--hardware` para a GPU local), com samplers linear e point, em alvo de resolução cheia e de meia resolução: 7.360 verificações de que cada amostra de meia resolução é a média do bloco 2×2. Também executam o código x86 da bandeja em três endereços de carga, com 14.137 verificações de caminhos Unicode, limites, retorno ao comportamento original e liberação de handles.
 
 Testes de renderização opcionais, usando Python no Windows (apenas biblioteca padrão):
 
@@ -76,6 +76,8 @@ Para construir outra configuração sem instalar:
 O projeto do Visual Studio compila o painel; `Build.bat` também prepara os binários distribuíveis. A auditoria opcional `tools\audit_binary.py` requer Python, `pefile` e `capstone` e usa `D3DDisassemble` do Windows; apenas lê binários e grava evidências em `obj\audit`.
 
 ## Recuperação e diagnóstico
+
+**Antivírus:** em 26/10/2026 o Surfshark Antivirus pôs em quarentena o motor modificado (`Drop.Win32.MemChangeSelf`), cerca de 1,5 min após o boot. A chave `Run` ficou sem executável e o terceiro monitor não iniciou. Também foram para a quarentena a cópia do backup e `dist\UDisplayConfig.exe` durante uma aplicação. O original de fábrica não foi marcado. Consulte `C:\ProgramData\Surfshark\antivirusLog.log`. Se o backup de uma transação não tiver mais `UDisplay.exe`, a recuperação repõe o original verificado em vez de falhar.
 
 Instalação: `%ProgramData%\UDisplay`. Backups: subpastas `backup-<id>`. Log: `UDisplayPro-update.log`. Registro de transação: `UDisplayPro.pending`. Não apague backups enquanto houver uma transação pendente.
 

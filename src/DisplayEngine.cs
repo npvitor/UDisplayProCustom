@@ -117,9 +117,24 @@ float main(PS_IN inp) : SV_Target {{
 float main(PS_IN inp) : SV_Target {{
     return dot(adjusted(inp.uv), float3({0:R},{1:R},{2:R})) + {3:R};
 }}", kr * ys, kg * ys, kb * ys, full ? 0 : 16.0 / 255);
+            // NV12 chroma has half the resolution of the source. One tap returns a
+            // single pixel with a point sampler (aliased colored edges); average the
+            // 2x2 block each chroma sample covers. Taps sit on texel centers, so the
+            // result does not depend on the engine's sampler filter. The footprint
+            // comes from the UV derivatives: a full-resolution target gets offset 0,
+            // which is the previous single-tap result.
             return common + string.Format(CultureInfo.InvariantCulture, @"
+float3 adjustedAt(float2 coord, float2 texel) {{
+    return transform(tx.SampleLevel(sam, clamp(coord, texel*0.5, 1.0-texel*0.5), 0).xyz);
+}}
 float2 main(PS_IN inp) : SV_Target {{
-    float3 rgb = adjusted(inp.uv);
+    uint width, height; tx.GetDimensions(width, height);
+    float2 step = 1.0 / float2(width, height);
+    float2 footprint = float2(abs(ddx(inp.uv.x)), abs(ddy(inp.uv.y))) * float2(width, height);
+    float2 offset = saturate(footprint - 1.0) * 0.5 * step;
+    float3 rgb = 0.25 * (adjustedAt(inp.uv - offset, step) + adjustedAt(inp.uv + offset, step) +
+                         adjustedAt(inp.uv + float2(offset.x, -offset.y), step) +
+                         adjustedAt(inp.uv + float2(-offset.x, offset.y), step));
     return clamp(float2(dot(rgb, float3({0:R},{1:R},{2:R})),
                         dot(rgb, float3({3:R},{4:R},{5:R}))) + 128.0/255.0, {6:R}, {7:R});
 }}", -kr / (2 * (1-kb)) * cs, -kg / (2*(1-kb)) * cs, .5*cs,
@@ -335,12 +350,20 @@ float2 main(PS_IN inp) : SV_Target {{
                         string name=File.ReadAllText(journal).Trim();
                         if(!System.Text.RegularExpressions.Regex.IsMatch(name,@"^backup-[0-9a-f]{32}$")) throw new IOException("Registro de recuperação inválido.");
                         string previous=Path.Combine(InstallDir,name);
-                        if(!File.Exists(Path.Combine(previous,"UDisplay.exe"))) throw new IOException("Backup de recuperação ausente.");
-                        Stop(); AtomicWrite(ExePath,File.ReadAllBytes(Path.Combine(previous,"UDisplay.exe")));
+                        // An antivirus can quarantine the backed-up engine as well (Surfshark
+                        // flagged patched engines as Drop.Win32.MemChangeSelf). Recovery must
+                        // still bring the display back, so fall back to the verified original;
+                        // the previous settings stay in the backup folder.
+                        string savedExe=Path.Combine(previous,"UDisplay.exe");
+                        bool factory=!File.Exists(savedExe);
+                        byte[] engine=factory ? SafePatcher.Original(OriginalPath) : File.ReadAllBytes(savedExe);
+                        Stop(); AtomicWrite(ExePath,engine);
                         string recoverIni=Path.Combine(InstallDir,"UDisplayPro.ini"), savedIni=Path.Combine(previous,"UDisplayPro.ini");
-                        if(File.Exists(savedIni)) AtomicWrite(recoverIni,File.ReadAllBytes(savedIni)); else if(File.Exists(recoverIni)) File.Delete(recoverIni);
+                        if(!factory && File.Exists(savedIni)) AtomicWrite(recoverIni,File.ReadAllBytes(savedIni)); else if(File.Exists(recoverIni)) File.Delete(recoverIni);
                         Start();
-                        File.Delete(journal); Log("Recuperada transação interrompida: "+name);
+                        File.Delete(journal);
+                        Log(factory ? "Backup sem UDisplay.exe (provável quarentena do antivírus); original de fábrica reposto: "+name
+                                    : "Recuperada transação interrompida: "+name);
                     }
                     if(mode=="--recover") return 0;
                     if(mode=="--restart") { Stop(); Start(); Log("Captura reiniciada."); return 0; }
@@ -357,7 +380,7 @@ float2 main(PS_IN inp) : SV_Target {{
                             string gone=Path.Combine(InstallDir,"UDisplayPro.ini"); if(File.Exists(gone)) File.Delete(gone);
                             Log("Original reinstalado: o executável estava ausente."); return 0;
                         }
-                        throw new FileNotFoundException("Instale primeiro o driver e o aplicativo original do adaptador. Para repor apenas o motor de fábrica, use Recuperar Original de Fábrica.",ExePath);
+                        throw new FileNotFoundException("UDisplay.exe está ausente. Se o antivírus o colocou em quarentena, use Recuperar Original de Fábrica; o original não é modificado. Se o driver nunca foi instalado, instale-o pelo instalador do adaptador.",ExePath);
                     }
                     byte[] original = SafePatcher.Original(OriginalPath);
                     ProConfig cfg = new ProConfig();

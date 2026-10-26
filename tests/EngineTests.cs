@@ -75,7 +75,9 @@ class EngineTests
             File.WriteAllText(Path.Combine(args[1],names[n]+(plane==0?"-y":"-uv")+".hlsl"),ShaderFactory.Source(configs[n],plane==1));
         // With sharpening off, do not pay for extra texture samples.
         Check(!ShaderFactory.Source(new ProConfig(),false).Contains("GetDimensions"),"Neutral fast path");
-        Check(!ShaderFactory.Source(new ProConfig {Sharpness=50},true).Contains("GetDimensions"),"Chroma pass never sharpened");
+        Check(!ShaderFactory.Source(new ProConfig {Sharpness=50},true).Contains("lumaAt"),"Chroma pass never sharpened");
+        foreach(ProConfig chroma in configs)
+            Check(ShaderFactory.Source(chroma,true).Contains("ddx(inp.uv.x)")&&ShaderFactory.Source(chroma,true).Split(new[]{"adjustedAt(inp.uv"},StringSplitOptions.None).Length==5,"Chroma pass averages 2x2 block");
         Console.WriteLine("PASS: "+builds+" shader configurations, "+assertions+" assertions; largest shader="+largest+" bytes; original code/data preserved except allowlisted operands.");
     }
 }
